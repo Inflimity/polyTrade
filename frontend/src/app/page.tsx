@@ -1,10 +1,32 @@
 "use client";
 import { Activity, ArrowUpRight, TrendingUp, AlertTriangle, Wifi, WifiOff } from "lucide-react";
-import { useWebSocket } from "@/hooks/useWebSocket";
+import { useState, useEffect } from "react";
 
 export default function Home() {
-  // Connect to the FastAPI backend layer we built in Phase 3
-  const { data, isConnected } = useWebSocket("ws://localhost:8000/api/stream");
+  const [isConnected, setIsConnected] = useState(false);
+  const [feed, setFeed] = useState<string[]>([]);
+  const [predictions, setPredictions] = useState<any[]>([]);
+
+  useEffect(() => {
+    const ws = new WebSocket("ws://localhost:8000/api/stream");
+    ws.onopen = () => setIsConnected(true);
+    ws.onclose = () => setIsConnected(false);
+    
+    ws.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.type === "raw_feed") {
+          setFeed((prev) => {
+            const up = [payload.message, ...prev];
+            return up.slice(0, 5); // Keep last 5 events
+          });
+        } else if (payload.type === "prediction_flag") {
+          setPredictions((prev) => [payload, ...prev].slice(0, 3));
+        }
+      } catch (e) {}
+    };
+    return () => ws.close();
+  }, []);
 
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-8">
@@ -38,9 +60,9 @@ export default function Home() {
             <Activity className="text-blue-500" size={20} />
           </div>
           <div className="mt-4">
-            <h3 className="text-3xl font-bold text-white">—</h3>
-            <p className="text-sm text-zinc-500 mt-1 flex items-center gap-1">
-              <span className="text-blue-500 flex items-center"><ArrowUpRight size={14} /> Pending integration</span>
+            <h3 className="text-3xl font-bold text-white">2</h3>
+            <p className="text-sm text-emerald-500 mt-1 flex items-center gap-1">
+              <span className="flex items-center"><ArrowUpRight size={14} /> Kalshi & Polymarket Sync</span>
             </p>
           </div>
         </div>
@@ -48,12 +70,14 @@ export default function Home() {
         <div className="bg-panel rounded-xl border border-border p-6 shadow-sm">
           <div className="flex justify-between items-start">
             <p className="text-sm font-medium text-zinc-400">Arbitrage Opportunities</p>
-            <AlertTriangle className="text-amber-500" size={20} />
+            <AlertTriangle className={predictions.length > 0 ? "text-emerald-500" : "text-amber-500"} size={20} />
           </div>
           <div className="mt-4">
-            <h3 className="text-3xl font-bold text-white">0</h3>
+            <h3 className="text-3xl font-bold text-white">{predictions.length}</h3>
             <p className="text-sm text-zinc-500 mt-1 flex items-center gap-1">
-              <span className="text-zinc-400">Scanner initializing</span>
+              <span className={predictions.length > 0 ? "text-emerald-400" : "text-zinc-400"}>
+                {predictions.length > 0 ? `Spread Detected (${predictions[0].profit_margin}%)` : "Scanner watching ..."}
+              </span>
             </p>
           </div>
         </div>
@@ -74,24 +98,55 @@ export default function Home() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <section className="bg-panel rounded-xl border border-border overflow-hidden">
-          <div className="p-6 border-b border-border">
-            <h2 className="text-lg font-semibold text-white">Latest Arbitrage Flags</h2>
-            <p className="text-sm text-zinc-400">Kalshi vs Polymarket spreads</p>
+          <div className="p-6 border-b border-border text-emerald-500">
+            <h2 className="text-lg font-semibold flex items-center gap-2"><TrendingUp size={16} /> Arbitrage Predictions</h2>
+            <p className="text-sm text-zinc-400">Actionable cross-exchange flags</p>
           </div>
-          <div className="p-6 flex flex-col items-center justify-center min-h-[300px] text-zinc-500">
-            <AlertTriangle size={32} className="mb-3 opacity-20" />
-            <p>{data ? `Latest event: ${JSON.stringify(data.source)}` : "Awaiting Scanner feed..."}</p>
+          <div className="p-6 min-h-[300px]">
+            {predictions.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-full text-zinc-500 pt-16">
+                 <AlertTriangle size={32} className="mb-3 opacity-20" />
+                 <p>Awaiting Scanner feed...</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {predictions.map((p, i) => (
+                  <div key={i} className="border border-emerald-900/50 bg-emerald-950/20 p-4 rounded-lg">
+                    <div className="flex justify-between items-end mb-2">
+                       <span className="font-bold text-emerald-400">{p.ticker}</span>
+                       <span className="text-sm bg-emerald-500/20 text-emerald-400 px-2 py-1 rounded">+{p.profit_margin}% margin</span>
+                    </div>
+                    <p className="text-sm text-zinc-300">Signal: <span className="text-white font-mono">{p.direction}</span></p>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </section>
 
         <section className="bg-panel rounded-xl border border-border overflow-hidden">
           <div className="p-6 border-b border-border">
-            <h2 className="text-lg font-semibold text-white">Recent Smart Money Feed</h2>
-            <p className="text-sm text-zinc-400">Live trades from top wallets</p>
+            <h2 className="text-lg font-semibold text-white">Live Market Data Feed</h2>
+            <p className="text-sm text-zinc-400">Parsed from Kalshi & Polymarket webhooks</p>
           </div>
-          <div className="p-6 flex flex-col items-center justify-center min-h-[300px] text-zinc-500">
-            <Activity size={32} className="mb-3 opacity-20" />
-            <p>Awaiting Phase 1 implementation.</p>
+          <div className="p-6 flex flex-col justify-start min-h-[300px] text-zinc-400 font-mono text-xs">
+            {feed.length === 0 ? (
+               <div className="flex flex-col items-center justify-center pt-16 opacity-50">
+                   <Activity size={32} className="mb-3 opacity-50" />
+                   <p>Awaiting packets...</p>
+               </div>
+            ) : (
+               <div className="space-y-3">
+                 {feed.map((msg, i) => {
+                   if (!msg || typeof msg !== "string") return null;
+                   return (
+                     <div key={i} className={`p-2 rounded border border-border/50 ${msg.includes("Kalshi") ? "bg-blue-900/10 text-blue-400" : "bg-purple-900/10 text-purple-400"}`}>
+                       {msg}
+                     </div>
+                   );
+                 })}
+               </div>
+            )}
           </div>
         </section>
       </div>
