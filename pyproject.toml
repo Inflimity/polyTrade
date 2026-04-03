@@ -22,6 +22,13 @@ dependencies = [
     "web3>=6.0.0",
     "simple-term-menu>=1.6.0",
     "python-dotenv>=1.2.1",
+    "fastapi>=0.128.8",
+    "uvicorn[standard]>=0.39.0",
+    "websockets>=15.0.1",
+    "thefuzz>=0.22.1",
+    "python-levenshtein>=0.27.1",
+    "python-telegram-bot>=22.5",
+    "psycopg2-binary>=2.9.11",
 ]
 
 [dependency-groups]
