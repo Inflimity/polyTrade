@@ -1,6 +1,11 @@
-import { Activity, ArrowUpRight, TrendingUp, AlertTriangle } from "lucide-react";
+"use client";
+import { Activity, ArrowUpRight, TrendingUp, AlertTriangle, Wifi, WifiOff } from "lucide-react";
+import { useWebSocket } from "@/hooks/useWebSocket";
 
 export default function Home() {
+  // Connect to the FastAPI backend layer we built in Phase 3
+  const { data, isConnected } = useWebSocket("ws://localhost:8000/api/stream");
+
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-8">
       <header className="flex justify-between items-center">
@@ -9,11 +14,20 @@ export default function Home() {
           <p className="text-zinc-400 mt-1">System status and overview</p>
         </div>
         <div className="flex items-center gap-3">
-          <span className="flex h-3 w-3">
-            <span className="animate-ping absolute inline-flex h-3 w-3 rounded-full bg-emerald-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
-          </span>
-          <span className="text-sm font-medium text-emerald-500">System Live</span>
+          {isConnected ? (
+            <>
+              <span className="flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-3 w-3 rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+              </span>
+              <span className="text-sm font-medium text-emerald-500 flex items-center gap-1"><Wifi size={14} /> Engine Connected</span>
+            </>
+          ) : (
+            <>
+              <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
+              <span className="text-sm font-medium text-red-500 flex items-center gap-1"><WifiOff size={14} /> Disconnected</span>
+            </>
+          )}
         </div>
       </header>
 
@@ -66,7 +80,7 @@ export default function Home() {
           </div>
           <div className="p-6 flex flex-col items-center justify-center min-h-[300px] text-zinc-500">
             <AlertTriangle size={32} className="mb-3 opacity-20" />
-            <p>Awaiting Phase 2 implementation.</p>
+            <p>{data ? `Latest event: ${JSON.stringify(data.source)}` : "Awaiting Scanner feed..."}</p>
           </div>
         </section>
 

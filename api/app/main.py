@@ -3,6 +3,11 @@ from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import json
 import logging
+import os
+from dotenv import load_dotenv
+
+# Load the environment configurations you pasted into .env.example
+load_dotenv(dotenv_path=".env.example")
 
 app = FastAPI(title="Prediction Market Alpha Engine API")
 
@@ -40,7 +45,9 @@ manager = ConnectionManager()
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ok", "message": "Alpha Engine Backend Live"}
+    key = os.getenv("POLYMARKET_API_KEY")
+    key_status = "Loaded" if key else "Missing"
+    return {"status": "ok", "message": f"Alpha Engine Backend Live. API Key: {key_status}"}
 
 @app.websocket("/api/stream")
 async def websocket_endpoint(websocket: WebSocket):
@@ -53,6 +60,7 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 import sys
+
 from pathlib import Path
 # Add project root to python path to allow importing from src
 sys.path.append(str(Path(__file__).parent.parent.parent))
