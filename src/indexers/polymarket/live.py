@@ -15,10 +15,14 @@ class PolymarketLiveFeed:
         self.callback = callback
         self.running = False
         
-    async def connect_and_stream(self):
+    async def connect_and_stream(self, asset_ids: list[str]):
         self.running = True
         retry_delay = 1
         
+        if not asset_ids:
+            logger.warning("No Polymarket asset IDs provided for WS subscription.")
+            return
+
         while self.running:
             try:
                 logger.info(f"Connecting to Polymarket WS at {self.URL}")
@@ -26,10 +30,14 @@ class PolymarketLiveFeed:
                     logger.info("Connected to Polymarket WS")
                     retry_delay = 1 # reset delay on successful connection
                     
-                    # Standard subscription payload for specific markets
-                    # We might need to listen to all or specific asset IDs.
-                    # Since polymarket doesn't have a single stream for "all trades" without filtering,
-                    # we would typically subscribe by token IDs here. For the skeleton, we listen.
+                    # Subscribe to specific asset IDs to avoid overloading the feed
+                    # Polymarket CLOB accepts chunks, we can send all in one list
+                    sub_message = {
+                        "assets_ids": asset_ids,
+                        "type": "market"
+                    }
+                    await websocket.send(json.dumps(sub_message))
+                    logger.info(f"Subscribed to {len(asset_ids)} Polymarket assets.")
                     
                     while self.running:
                         message = await websocket.recv()

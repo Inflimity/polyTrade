@@ -53,7 +53,7 @@ class KalshiLiveFeed:
             "KALSHI-ACCESS-TIMESTAMP": ts,
         }
         
-    async def connect_and_stream(self):
+    async def connect_and_stream(self, kalshi_tickers: list[str] = None):
         self.running = True
         retry_delay = 1
         
@@ -67,12 +67,16 @@ class KalshiLiveFeed:
                     logger.info("Connected to Kalshi WS")
                     retry_delay = 1
                     
-                    # Subscribe to generic active market delta (for testing)
+                    # Subscribe to orderbook delta for specific markets
                     sub_message = {
                         "id": 1,
                         "cmd": "subscribe",
                         "params": {"channels": ["ticker", "orderbook_delta"]}
                     }
+                    if kalshi_tickers:
+                        sub_message["params"]["market_tickers"] = kalshi_tickers
+                        logger.info(f"Subscribed to {len(kalshi_tickers)} Kalshi markets.")
+                    
                     await websocket.send(json.dumps(sub_message))
                     
                     while self.running:

@@ -6,8 +6,8 @@ import logging
 import os
 from dotenv import load_dotenv
 
-# Load the environment configurations you pasted into .env.example
-load_dotenv(dotenv_path=".env.example")
+# Load the environment configurations
+load_dotenv(dotenv_path=".env")
 
 app = FastAPI(title="Prediction Market Alpha Engine API")
 
@@ -67,54 +67,75 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from src.indexers.polymarket.live import PolymarketLiveFeed
 from src.indexers.kalshi.live import KalshiLiveFeed
+from src.indexers.polymarket.client import PolymarketClient
+from src.indexers.kalshi.client import KalshiClient
 from src.analysis.common.arbitrage_scanner import ArbitrageScanner
 from src.analysis.common.market_matcher import MarketMatcher, MatchedMarket
 
 # Initialize our scanner instances
-matcher = MarketMatcher()
+matcher = MarketMatcher(similarity_threshold=85.0)
 scanner = ArbitrageScanner(target_profit_margin=1.0) # 1% profit margin minimum
 
 # Store live latest data
+# Structure: live_books["kalshi"]["ticker"] = {"yes_ask": X, "no_ask": Y}
+# Structure: live_books["polymarket"]["asset_id"] = {"price": X}
 live_books = {
     "kalshi": {},
     "polymarket": {}
 }
 
-# A mock list of matched markets just for the MVP
-# In a real scenario, this would be periodically computed by hitting the REST APIs of both
-DEMO_MATCHES = [
-    MatchedMarket(
-        kalshi_ticker="KXVS-24",
-        kalshi_title="Will Trump win?",
-        polymarket_id="0xdeadbeef",
-        polymarket_question="Will Trump win the 2024 Presidential Election?",
-        similarity_score=95.0
-    )
-]
+# The active dynamically matched markets
+ACTIVE_MATCHES: list[MatchedMarket] = []
 
 async def handle_market_update(payload: dict):
     """Processes incoming data from either exchange and scans for arbitrage."""
     source = payload.get("source")
     data = payload.get("data", {})
     
-    # 1. Format human-readable ticker stream
+    # 1. Format human-readable ticker stream & Update local caches
     message_str = "Received heartbeat or empty payload"
+    
     if source == "kalshi":
-        # Rough extraction of kalshi websocket structures
         msg_type = data.get("type")
         if msg_type == "orderbook_delta":
             ticker = data.get("market_ticker", "Unknown")
-            price = data.get("delta", {}).get("price", "??")
-            message_str = f"Kalshi Orderbook update on {ticker} at {price}¢"
+            # The delta comes as {"yes": [[price, qty]], "no": [[price, qty]]}
+            delta = data.get("delta", {})
+            try:
+                yes_ask = delta.get("yes", [])[0][0] # first ask price
+            except IndexError:
+                yes_ask = None
+                
+            try:
+                no_ask = delta.get("no", [])[0][0]
+            except IndexError:
+                no_ask = None
+                
+            if ticker not in live_books["kalshi"]:
+                live_books["kalshi"][ticker] = {}
+            if yes_ask is not None: live_books["kalshi"][ticker]["yes_ask"] = yes_ask
+            if no_ask is not None: live_books["kalshi"][ticker]["no_ask"] = no_ask
+            
+            message_str = f"Kalshi Orderbook update on {ticker}: YES={yes_ask}¢ NO={no_ask}¢"
         else:
             message_str = f"Kalshi emitted event: {msg_type or 'ping'}"
+            
     elif source == "polymarket":
-        # Polymarket format
-        event_type = isinstance(data, list) and data[0].get("event_type") or data.get("event_type")
-        if event_type:
-            message_str = f"Polymarket Orderbook delta: {event_type}"
-        else:
-            message_str = f"Polymarket emitted state update"
+        # Polymarket format: array of events
+        events = data if isinstance(data, list) else [data]
+        message_str = f"Polymarket emitted state update"
+        for event in events:
+            if event.get("event_type") == "price_change" or event.get("event_type") == "book":
+                asset_id = event.get("asset_id")
+                # price in Polymarket API is 0.0 to 1.0, convert to cents
+                try:
+                    price = float(event.get("price", 0)) * 100
+                except (ValueError, TypeError):
+                    price = None
+                    
+                if asset_id and price is not None:
+                    live_books["polymarket"][asset_id] = {"price": price}
+                    message_str = f"Polymarket Orderbook delta: {asset_id} at {price:.1f}¢"
             
     # Broadcast raw data to dashboard 'live feed' tab
     await manager.broadcast({
@@ -124,45 +145,76 @@ async def handle_market_update(payload: dict):
     })
     
     # 2. Feed the Arbitrage Engine to make Predictions
-    # We simulate an arbitrage hit 5% of the time based on the active mock
-    import random
-    if random.random() < 0.05:
-        match = DEMO_MATCHES[0]
-        # Simulate live prices in cents
-        fake_k_yes = random.randint(45, 50)
-        fake_k_no = 100 - fake_k_yes
-        fake_p_yes = fake_k_yes + random.randint(3, 8)  # Polymarket differs
-        fake_p_no = 100 - fake_p_yes
+    for match in ACTIVE_MATCHES:
+        k_data = live_books["kalshi"].get(match.kalshi_ticker, {})
         
-        opportunity = scanner.calculate_spread(
-            k_yes=fake_k_yes, k_no=fake_k_no, 
-            p_yes=fake_p_yes, p_no=fake_p_no
-        )
+        # Need to find YES and NO prices from Polymarket assets
+        # Polymarket typically has 2 outcome tokens. Let's assume asset_ids[0] is YES, [1] is NO
+        p_yes, p_no = None, None
+        if len(match.polymarket_asset_ids) >= 2:
+            p_yes_id = match.polymarket_asset_ids[0]
+            p_no_id = match.polymarket_asset_ids[1]
+            p_yes = live_books["polymarket"].get(p_yes_id, {}).get("price")
+            p_no = live_books["polymarket"].get(p_no_id, {}).get("price")
+            
+        p_data = {"yes_ask": p_yes, "no_ask": p_no}
         
-        spread, direction = opportunity
-        if spread > 0:
+        opportunity = scanner.scan(match, k_data, p_data)
+        if opportunity:
             await manager.broadcast({
                 "type": "prediction_flag",
                 "ticker": match.kalshi_ticker,
-                "direction": direction,
-                "profit_margin": round(spread, 2),
-                "k_yes": fake_k_yes,
-                "p_yes": fake_p_yes
+                "direction": opportunity.direction,
+                "profit_margin": round(opportunity.spread_pct, 2),
+                "k_yes": opportunity.kalshi_yes_price_cents,
+                "p_yes": opportunity.polymarket_yes_price_cents
             })
     
 async def orchestrate_data_feeds():
     logger = logging.getLogger(__name__)
     logging.basicConfig(level=logging.INFO)
+    logger.info("Initializing REST clients to find cross-exchange matching markets...")
     
+    # 1. Fetch Active Markets
+    try:
+        with KalshiClient() as kc:
+            k_markets = kc.list_markets(limit=200, status="active")
+    except Exception as e:
+        logger.error(f"Failed to fetch Kalshi markets: {e}")
+        k_markets = []
+        
+    try:
+        with PolymarketClient() as pc:
+            p_markets = pc.get_markets(limit=200, active=True)
+    except Exception as e:
+        logger.error(f"Failed to fetch Polymarket markets: {e}")
+        p_markets = []
+        
+    logger.info(f"Loaded {len(k_markets)} Kalshi markets and {len(p_markets)} Polymarket markets.")
+    
+    # 2. Match the markets using NLP
+    global ACTIVE_MATCHES
+    ACTIVE_MATCHES = matcher.find_all_matches(k_markets, p_markets)
+    # Sort by highest score and take top 50 to avoid overloading limits
+    ACTIVE_MATCHES.sort(key=lambda x: x.similarity_score, reverse=True)
+    ACTIVE_MATCHES = ACTIVE_MATCHES[:50]
+    
+    logger.info(f"Successfully matched {len(ACTIVE_MATCHES)} overlapping markets!")
+    
+    # 3. Extract the exact identifiers we need for WebSocket Subscriptions
+    kalshi_tickers = [m.kalshi_ticker for m in ACTIVE_MATCHES]
+    polymarket_asset_ids = []
+    for m in ACTIVE_MATCHES:
+        polymarket_asset_ids.extend(m.polymarket_asset_ids)
+
+    # 4. Start the WebSockets with the precise tracking targets
     polymarket_feed = PolymarketLiveFeed(handle_market_update)
     kalshi_feed = KalshiLiveFeed(handle_market_update)
     
-    # Start tasks without blocking the main event loop
-    asyncio.create_task(polymarket_feed.connect_and_stream())
-    asyncio.create_task(kalshi_feed.connect_and_stream())
+    asyncio.create_task(polymarket_feed.connect_and_stream(asset_ids=polymarket_asset_ids))
+    asyncio.create_task(kalshi_feed.connect_and_stream(kalshi_tickers=kalshi_tickers))
     
     while True:
-        # We can implement a periodic manual scan or cleanup here
         await asyncio.sleep(60)
 
 @app.on_event("startup")

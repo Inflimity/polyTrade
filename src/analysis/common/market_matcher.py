@@ -1,8 +1,14 @@
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 import json
 import logging
 from dataclasses import dataclass
 from thefuzz import fuzz
+
+try:
+    from src.indexers.kalshi.models import Market as KalshiMarket
+    from src.indexers.polymarket.models import Market as PolymarketMarket
+except ImportError:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +19,7 @@ class MatchedMarket:
     polymarket_id: str
     polymarket_question: str
     similarity_score: float
+    polymarket_asset_ids: list[str]
 
 class MarketMatcher:
     """Matches Kalshi markets to Polymarket markets using fuzzy NLP matching."""
@@ -36,9 +43,9 @@ class MarketMatcher:
         # Replace multiple spaces
         return " ".join(text.split())
 
-    def match_market(self, kalshi_market: Dict, polymarket_markets: List[Dict]) -> Optional[MatchedMarket]:
+    def match_market(self, kalshi_market: 'KalshiMarket', polymarket_markets: List['PolymarketMarket']) -> Optional[MatchedMarket]:
         """Find the best match for a Kalshi market among active Polymarket markets."""
-        kalshi_title = f"{kalshi_market.get('title', '')} {kalshi_market.get('yes_sub_title', '')}"
+        kalshi_title = f"{getattr(kalshi_market, 'title', '')} {getattr(kalshi_market, 'yes_sub_title', '')}"
         cleaned_k_title = self.preprocess_text(kalshi_title)
         
         if not cleaned_k_title:
@@ -48,7 +55,7 @@ class MarketMatcher:
         highest_score = 0
         
         for p_market in polymarket_markets:
-            p_question = p_market.get("question", "")
+            p_question = getattr(p_market, 'question', '')
             cleaned_p_title = self.preprocess_text(p_question)
             
             if not cleaned_p_title:
@@ -62,17 +69,23 @@ class MarketMatcher:
                 best_match = p_market
                 
         if highest_score >= self.similarity_threshold and best_match:
+            try:
+                asset_ids = json.loads(best_match.clob_token_ids)
+            except Exception:
+                asset_ids = []
+                
             return MatchedMarket(
-                kalshi_ticker=kalshi_market["ticker"],
+                kalshi_ticker=kalshi_market.ticker,
                 kalshi_title=kalshi_title.strip(),
-                polymarket_id=best_match["id"],
-                polymarket_question=best_match["question"],
-                similarity_score=highest_score
+                polymarket_id=best_match.condition_id or best_match.id,
+                polymarket_question=best_match.question,
+                similarity_score=highest_score,
+                polymarket_asset_ids=asset_ids
             )
             
         return None
 
-    def find_all_matches(self, kalshi_markets: List[Dict], polymarket_markets: List[Dict]) -> List[MatchedMarket]:
+    def find_all_matches(self, kalshi_markets: List['KalshiMarket'], polymarket_markets: List['PolymarketMarket']) -> List[MatchedMarket]:
         """Find matches for all provided markets."""
         matches = []
         for k_market in kalshi_markets:
