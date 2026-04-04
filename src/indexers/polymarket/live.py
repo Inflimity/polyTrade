@@ -26,7 +26,11 @@ class PolymarketLiveFeed:
         while self.running:
             try:
                 logger.info(f"Connecting to Polymarket WS at {self.URL}")
-                async with websockets.connect(self.URL) as websocket:
+                async with websockets.connect(
+                    self.URL,
+                    ping_interval=20,
+                    ping_timeout=10
+                ) as websocket:
                     logger.info("Connected to Polymarket WS")
                     retry_delay = 1 # reset delay on successful connection
                     
@@ -40,12 +44,18 @@ class PolymarketLiveFeed:
                     logger.info(f"Subscribed to {len(asset_ids)} Polymarket assets with custom features enabled.")
                     
                     while self.running:
-                        message = await websocket.recv()
-                        data = json.loads(message)
-                        await self.callback({"source": "polymarket", "data": data})
+                        try:
+                            message = await asyncio.wait_for(websocket.recv(), timeout=60)
+                            data = json.loads(message)
+                            await self.callback({"source": "polymarket", "data": data})
+                        except asyncio.TimeoutError:
+                            continue
+                        except Exception as e:
+                            logger.error(f"Error processing Polymarket message: {e}")
+                            continue
                         
-            except websockets.exceptions.ConnectionClosed:
-                logger.warning("Polymarket WS connection closed")
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.warning(f"Polymarket WS closed: code={e.code} reason={e.reason}")
             except Exception as e:
                 logger.error(f"Error in Polymarket WS stream: {e}")
                 
@@ -56,3 +66,4 @@ class PolymarketLiveFeed:
                 
     def stop(self):
         self.running = False
+
