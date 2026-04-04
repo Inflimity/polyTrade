@@ -99,32 +99,53 @@ async def handle_market_update(payload: dict):
         msg_type = data.get("type")
         msg_payload = data.get("msg", {}) # Kalshi V2 wraps data in 'msg'
         
-        if msg_type == "orderbook_delta" or msg_type == "ticker":
-            ticker = msg_payload.get("market_ticker") or data.get("market_ticker", "Unknown")
+        if msg_type == "ticker":
+            ticker = msg_payload.get("market_ticker", "Unknown")
             
-            # Extract prices (v2 sometimes uses yes_ask in top-level, sometimes in 'msg')
-            yes_ask = msg_payload.get("yes_ask") or data.get("yes_ask")
-            no_ask = msg_payload.get("no_ask") or data.get("no_ask")
+            # V2 ticker format uses dollar strings: "yes_ask_dollars": "0.3500"
+            yes_ask_str = msg_payload.get("yes_ask_dollars")
+            yes_bid_str = msg_payload.get("yes_bid_dollars")
             
-            if msg_type == "orderbook_delta":
-                delta = msg_payload.get("delta", {}) or data.get("delta", {})
+            yes_ask = None
+            no_ask = None
+            if yes_ask_str:
                 try:
-                    p_list = delta.get("yes", [])
-                    if p_list and not yes_ask: yes_ask = p_list[0][0]
-                except (IndexError, TypeError): pass
-                try:
-                    p_list = delta.get("no", [])
-                    if p_list and not no_ask: no_ask = p_list[0][0]
-                except (IndexError, TypeError): pass
-                
+                    yes_ask = float(yes_ask_str) * 100  # Convert dollars to cents
+                    no_ask = 100.0 - yes_ask  # In binary markets, no_ask ≈ 100 - yes_ask
+                except (ValueError, TypeError):
+                    pass
+            
             if ticker and ticker != "Unknown":
                 if ticker not in live_books["kalshi"]:
                     live_books["kalshi"][ticker] = {}
-                if yes_ask is not None: live_books["kalshi"][ticker]["yes_ask"] = float(yes_ask)
-                if no_ask is not None: live_books["kalshi"][ticker]["no_ask"] = float(no_ask)
-                message_str = f"Kalshi {msg_type}: {ticker} Y:{yes_ask}¢ N:{no_ask}¢"
+                if yes_ask is not None: live_books["kalshi"][ticker]["yes_ask"] = yes_ask
+                if no_ask is not None: live_books["kalshi"][ticker]["no_ask"] = no_ask
+                message_str = f"Kalshi ticker: {ticker} Y:{yes_ask:.0f}¢ N:{no_ask:.0f}¢" if yes_ask else f"Kalshi ticker: {ticker}"
             else:
-                message_str = f"Kalshi tick: {msg_type} (ignored)"
+                message_str = f"Kalshi tick (ignored)"
+                
+        elif msg_type == "orderbook_delta":
+            ticker = msg_payload.get("market_ticker", "Unknown")
+            delta = msg_payload.get("delta", {})
+            yes_ask = None
+            no_ask = None
+            try:
+                p_list = delta.get("yes", [])
+                if p_list: yes_ask = float(p_list[0][0])
+            except (IndexError, TypeError, ValueError): pass
+            try:
+                p_list = delta.get("no", [])
+                if p_list: no_ask = float(p_list[0][0])
+            except (IndexError, TypeError, ValueError): pass
+            
+            if ticker and ticker != "Unknown":
+                if ticker not in live_books["kalshi"]:
+                    live_books["kalshi"][ticker] = {}
+                if yes_ask is not None: live_books["kalshi"][ticker]["yes_ask"] = yes_ask
+                if no_ask is not None: live_books["kalshi"][ticker]["no_ask"] = no_ask
+                message_str = f"Kalshi OB: {ticker} Y:{yes_ask}¢ N:{no_ask}¢"
+            else:
+                message_str = f"Kalshi OB (ignored)"
         else:
             message_str = f"Kalshi event: {msg_type}"
             
@@ -194,20 +215,34 @@ async def orchestrate_data_feeds():
     logging.basicConfig(level=logging.INFO)
     logger.info("Initializing REST clients to find cross-exchange matching markets...")
     
-    # 1. Fetch Active Markets
+    # 1. Fetch Active Markets — paginate to get a wider pool
+    # Kalshi: status must be "open" (the API returns them with status="active" but filters by "open")
+    k_markets = []
     try:
         with KalshiClient() as kc:
-            k_markets = kc.list_markets(limit=200, status="active")
+            for page in range(3):  # Fetch 3 pages of 200 = up to 600 markets
+                batch = kc.list_markets(limit=200, status="open", cursor=None)
+                k_markets.extend(batch)
+                if len(batch) < 200:
+                    break
+        # Filter to binary markets only (skip multi-leg parlays)
+        k_markets = [m for m in k_markets if m.market_type == "binary"]
     except Exception as e:
         logger.error(f"Failed to fetch Kalshi markets: {e}")
-        k_markets = []
         
+    # Polymarket: active=true, closed=false, sorted by volume descending
+    p_markets = []
     try:
         with PolymarketClient() as pc:
-            p_markets = pc.get_markets(limit=200, active=True)
+            for offset in [0, 100, 200]:  # Fetch 3 pages
+                batch = pc.get_markets(limit=100, offset=offset, active=True, closed=False, order="volume", ascending=False)
+                p_markets.extend(batch)
+                if len(batch) < 100:
+                    break
+        # Filter out any that slipped through with no clob token ids
+        p_markets = [m for m in p_markets if m.clob_token_ids and m.clob_token_ids != "[]"]
     except Exception as e:
         logger.error(f"Failed to fetch Polymarket markets: {e}")
-        p_markets = []
         
     logger.info(f"Loaded {len(k_markets)} Kalshi markets and {len(p_markets)} Polymarket markets.")
     
@@ -227,13 +262,36 @@ async def orchestrate_data_feeds():
     polymarket_asset_ids = []
     for m in ACTIVE_MATCHES:
         polymarket_asset_ids.extend(m.polymarket_asset_ids)
+    # Deduplicate
+    polymarket_asset_ids = list(set(polymarket_asset_ids))
+    
+    # FALLBACK: If no matches found, subscribe to the top Polymarket markets by volume anyway
+    # so we still get live data flowing and the dashboard isn't dead
+    if not polymarket_asset_ids and p_markets:
+        import json as _json
+        logger.info("No cross-exchange matches found. Subscribing to top Polymarket markets for live feed...")
+        for pm in p_markets[:20]:
+            try:
+                ids = _json.loads(pm.clob_token_ids)
+                polymarket_asset_ids.extend(ids)
+            except Exception:
+                pass
+        polymarket_asset_ids = list(set(polymarket_asset_ids))
+    
+    logger.info(f"Subscribing to {len(kalshi_tickers)} Kalshi tickers and {len(polymarket_asset_ids)} Polymarket assets")
 
-    # 4. Start the WebSockets with the precise tracking targets
+    # 4. Start the WebSockets
     polymarket_feed = PolymarketLiveFeed(handle_market_update)
     kalshi_feed = KalshiLiveFeed(handle_market_update)
     
-    asyncio.create_task(polymarket_feed.connect_and_stream(asset_ids=polymarket_asset_ids))
-    asyncio.create_task(kalshi_feed.connect_and_stream(kalshi_tickers=kalshi_tickers))
+    # Always connect Polymarket if we have asset IDs
+    if polymarket_asset_ids:
+        asyncio.create_task(polymarket_feed.connect_and_stream(asset_ids=polymarket_asset_ids))
+    else:
+        logger.warning("No Polymarket assets to subscribe to!")
+    
+    # Always connect Kalshi — pass tickers if we have matches, otherwise global firehose
+    asyncio.create_task(kalshi_feed.connect_and_stream(kalshi_tickers=kalshi_tickers if kalshi_tickers else None))
     
     while True:
         await asyncio.sleep(60)
