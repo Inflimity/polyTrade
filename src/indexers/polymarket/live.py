@@ -31,13 +31,13 @@ class PolymarketLiveFeed:
                     retry_delay = 1 # reset delay on successful connection
                     
                     # Subscribe to specific asset IDs to avoid overloading the feed
-                    # Polymarket CLOB accepts chunks, we can send all in one list
                     sub_message = {
                         "assets_ids": asset_ids,
-                        "type": "market"
+                        "type": "market",
+                        "custom_feature_enabled": True
                     }
                     await websocket.send(json.dumps(sub_message))
-                    logger.info(f"Subscribed to {len(asset_ids)} Polymarket assets.")
+                    logger.info(f"Subscribed to {len(asset_ids)} Polymarket assets with custom features enabled.")
                     
                     while self.running:
                         message = await websocket.recv()

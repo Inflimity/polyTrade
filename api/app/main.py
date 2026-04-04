@@ -73,8 +73,8 @@ from src.analysis.common.arbitrage_scanner import ArbitrageScanner
 from src.analysis.common.market_matcher import MarketMatcher, MatchedMarket
 
 # Initialize our scanner instances
-matcher = MarketMatcher(similarity_threshold=85.0)
-scanner = ArbitrageScanner(target_profit_margin=1.0) # 1% profit margin minimum
+matcher = MarketMatcher(similarity_threshold=75.0)
+scanner = ArbitrageScanner(target_profit_margin=0.5) # Lowered for testing
 
 # Store live latest data
 # Structure: live_books["kalshi"]["ticker"] = {"yes_ask": X, "no_ask": Y}
@@ -97,51 +97,70 @@ async def handle_market_update(payload: dict):
     
     if source == "kalshi":
         msg_type = data.get("type")
-        if msg_type == "orderbook_delta":
-            ticker = data.get("market_ticker", "Unknown")
-            # The delta comes as {"yes": [[price, qty]], "no": [[price, qty]]}
-            delta = data.get("delta", {})
-            try:
-                yes_ask = delta.get("yes", [])[0][0] # first ask price
-            except IndexError:
-                yes_ask = None
-                
-            try:
-                no_ask = delta.get("no", [])[0][0]
-            except IndexError:
-                no_ask = None
-                
-            if ticker not in live_books["kalshi"]:
-                live_books["kalshi"][ticker] = {}
-            if yes_ask is not None: live_books["kalshi"][ticker]["yes_ask"] = yes_ask
-            if no_ask is not None: live_books["kalshi"][ticker]["no_ask"] = no_ask
+        msg_payload = data.get("msg", {}) # Kalshi V2 wraps data in 'msg'
+        
+        if msg_type == "orderbook_delta" or msg_type == "ticker":
+            ticker = msg_payload.get("market_ticker") or data.get("market_ticker", "Unknown")
             
-            message_str = f"Kalshi Orderbook update on {ticker}: YES={yes_ask}¢ NO={no_ask}¢"
+            # Extract prices (v2 sometimes uses yes_ask in top-level, sometimes in 'msg')
+            yes_ask = msg_payload.get("yes_ask") or data.get("yes_ask")
+            no_ask = msg_payload.get("no_ask") or data.get("no_ask")
+            
+            if msg_type == "orderbook_delta":
+                delta = msg_payload.get("delta", {}) or data.get("delta", {})
+                try:
+                    p_list = delta.get("yes", [])
+                    if p_list and not yes_ask: yes_ask = p_list[0][0]
+                except (IndexError, TypeError): pass
+                try:
+                    p_list = delta.get("no", [])
+                    if p_list and not no_ask: no_ask = p_list[0][0]
+                except (IndexError, TypeError): pass
+                
+            if ticker and ticker != "Unknown":
+                if ticker not in live_books["kalshi"]:
+                    live_books["kalshi"][ticker] = {}
+                if yes_ask is not None: live_books["kalshi"][ticker]["yes_ask"] = float(yes_ask)
+                if no_ask is not None: live_books["kalshi"][ticker]["no_ask"] = float(no_ask)
+                message_str = f"Kalshi {msg_type}: {ticker} Y:{yes_ask}¢ N:{no_ask}¢"
+            else:
+                message_str = f"Kalshi tick: {msg_type} (ignored)"
         else:
-            message_str = f"Kalshi emitted event: {msg_type or 'ping'}"
+            message_str = f"Kalshi event: {msg_type}"
             
     elif source == "polymarket":
-        # Polymarket format: array of events
         events = data if isinstance(data, list) else [data]
-        message_str = f"Polymarket emitted state update"
         for event in events:
-            if event.get("event_type") == "price_change" or event.get("event_type") == "book":
-                asset_id = event.get("asset_id")
-                # price in Polymarket API is 0.0 to 1.0, convert to cents
+            e_type = event.get("event_type")
+            asset_id = event.get("asset_id")
+            
+            # Polymarket price can be top-level or nested in bids/asks
+            price = event.get("price") or event.get("ask")
+            if not price and e_type == "book":
+                asks = event.get("asks", [])
+                if asks: price = asks[0].get("price")
+            
+            if asset_id and price is not None:
                 try:
-                    price = float(event.get("price", 0)) * 100
+                    p_cents = float(price) * 100
+                    live_books["polymarket"][asset_id] = {"price": p_cents}
+                    message_str = f"Poly {e_type}: {asset_id[:8]}.. @ {p_cents:.1f}¢"
                 except (ValueError, TypeError):
-                    price = None
-                    
-                if asset_id and price is not None:
-                    live_books["polymarket"][asset_id] = {"price": price}
-                    message_str = f"Polymarket Orderbook delta: {asset_id} at {price:.1f}¢"
+                    pass
+            elif e_type == "ping":
+                message_str = "Poly heartbeat"
             
     # Broadcast raw data to dashboard 'live feed' tab
     await manager.broadcast({
         "type": "raw_feed",
         "source": source,
         "message": message_str
+    })
+    
+    # Broadcast current system status periodically or on every update
+    await manager.broadcast({
+        "type": "system_status",
+        "total_matched": len(ACTIVE_MATCHES)
     })
     
     # 2. Feed the Arbitrage Engine to make Predictions
@@ -200,6 +219,8 @@ async def orchestrate_data_feeds():
     ACTIVE_MATCHES = ACTIVE_MATCHES[:50]
     
     logger.info(f"Successfully matched {len(ACTIVE_MATCHES)} overlapping markets!")
+    for i, m in enumerate(ACTIVE_MATCHES[:5]):
+        logger.info(f"Match #{i+1} ({m.similarity_score}%): {m.kalshi_ticker} <-> {m.polymarket_question[:40]}..")
     
     # 3. Extract the exact identifiers we need for WebSocket Subscriptions
     kalshi_tickers = [m.kalshi_ticker for m in ACTIVE_MATCHES]

@@ -6,6 +6,7 @@ export default function Home() {
   const [isConnected, setIsConnected] = useState(false);
   const [feed, setFeed] = useState<string[]>([]);
   const [predictions, setPredictions] = useState<any[]>([]);
+  const [totalTracked, setTotalTracked] = useState(0);
 
   useEffect(() => {
     const ws = new WebSocket("ws://localhost:8000/api/stream");
@@ -22,6 +23,8 @@ export default function Home() {
           });
         } else if (payload.type === "prediction_flag") {
           setPredictions((prev) => [payload, ...prev].slice(0, 3));
+        } else if (payload.type === "system_status") {
+          setTotalTracked(payload.total_matched || 0);
         }
       } catch (e) {}
     };
@@ -60,7 +63,7 @@ export default function Home() {
             <Activity className="text-blue-500" size={20} />
           </div>
           <div className="mt-4">
-            <h3 className="text-3xl font-bold text-white">2</h3>
+            <h3 className="text-3xl font-bold text-white">{totalTracked}</h3>
             <p className="text-sm text-emerald-500 mt-1 flex items-center gap-1">
               <span className="flex items-center"><ArrowUpRight size={14} /> Kalshi & Polymarket Sync</span>
             </p>
