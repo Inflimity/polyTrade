@@ -93,7 +93,7 @@ async def handle_market_update(payload: dict):
     data = payload.get("data", {})
     
     # 1. Format human-readable ticker stream & Update local caches
-    message_str = "Received heartbeat or empty payload"
+    message_str = None  # Only set when we have meaningful data
     
     if source == "kalshi":
         msg_type = data.get("type")
@@ -120,9 +120,8 @@ async def handle_market_update(payload: dict):
                     live_books["kalshi"][ticker] = {}
                 if yes_ask is not None: live_books["kalshi"][ticker]["yes_ask"] = yes_ask
                 if no_ask is not None: live_books["kalshi"][ticker]["no_ask"] = no_ask
-                message_str = f"Kalshi ticker: {ticker} Y:{yes_ask:.0f}¢ N:{no_ask:.0f}¢" if yes_ask else f"Kalshi ticker: {ticker}"
-            else:
-                message_str = f"Kalshi tick (ignored)"
+                if yes_ask:
+                    message_str = f"Kalshi: {ticker} Y:{yes_ask:.0f}¢ N:{no_ask:.0f}¢"
                 
         elif msg_type == "orderbook_delta":
             ticker = msg_payload.get("market_ticker", "Unknown")
@@ -138,16 +137,12 @@ async def handle_market_update(payload: dict):
                 if p_list: no_ask = float(p_list[0][0])
             except (IndexError, TypeError, ValueError): pass
             
-            if ticker and ticker != "Unknown":
+            if ticker and ticker != "Unknown" and (yes_ask or no_ask):
                 if ticker not in live_books["kalshi"]:
                     live_books["kalshi"][ticker] = {}
                 if yes_ask is not None: live_books["kalshi"][ticker]["yes_ask"] = yes_ask
                 if no_ask is not None: live_books["kalshi"][ticker]["no_ask"] = no_ask
                 message_str = f"Kalshi OB: {ticker} Y:{yes_ask}¢ N:{no_ask}¢"
-            else:
-                message_str = f"Kalshi OB (ignored)"
-        else:
-            message_str = f"Kalshi event: {msg_type}"
             
     elif source == "polymarket":
         events = data if isinstance(data, list) else [data]
@@ -165,18 +160,17 @@ async def handle_market_update(payload: dict):
                 try:
                     p_cents = float(price) * 100
                     live_books["polymarket"][asset_id] = {"price": p_cents}
-                    message_str = f"Poly {e_type}: {asset_id[:8]}.. @ {p_cents:.1f}¢"
+                    message_str = f"Poly {e_type}: {asset_id[:12]}.. @ {p_cents:.1f}¢"
                 except (ValueError, TypeError):
                     pass
-            elif e_type == "ping":
-                message_str = "Poly heartbeat"
             
-    # Broadcast raw data to dashboard 'live feed' tab
-    await manager.broadcast({
-        "type": "raw_feed",
-        "source": source,
-        "message": message_str
-    })
+    # Only broadcast meaningful data to dashboard (skip heartbeats/empty)
+    if message_str:
+        await manager.broadcast({
+            "type": "raw_feed",
+            "source": source,
+            "message": message_str
+        })
     
     # Broadcast current system status periodically or on every update
     await manager.broadcast({
